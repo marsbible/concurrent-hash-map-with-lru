@@ -1987,8 +1987,7 @@ public:// Ctors ................................................................
 
 	 while((bucket=(t?ARRAYQ_FIRST(&segment._age_head):segment._lru.lru_getoldest_lock())) != NULL)
 	 {
-        printf("%lld %lld %lld\n",c,bucket->_access_time,ink_hrtime_from_sec(timeout));
-	 	if(c - bucket->_access_time < ink_hrtime_from_sec(timeout))
+            if(c - bucket->_access_time < ink_hrtime_from_sec(timeout))
 	      break;
  #ifdef DEBUG_EVICT      
         char title[64];

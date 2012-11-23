@@ -47,7 +47,7 @@
 #include <stdio.h>
 #include <limits.h>
 #include <malloc.h>
-#include <sys/queue.h>
+//#include <sys/queue.h>
 #include <pthread.h>
 #include <time.h>
 #include <iostream>
@@ -75,6 +75,81 @@ ink_hrtime ink_hrtime_from_sec(unsigned int sec)
 #endif
 
 #define  _NULL_DELTA SHRT_MIN 
+
+/*
+ *  * Array-based tail queue functions.
+ *   */
+#define ARRAYQ_HEAD(name, type)\
+    struct name {\
+    type * volatile tqh_first;  \
+    type * volatile tqh_last;\
+}
+
+#define ARRAYQ_ENTRY(type)\
+                    struct {\
+                    short volatile tqe_next;/* next element */\
+                    short volatile tqe_prev;/* address of previous next element */\
+                    }
+
+#define ARRAYQ_INIT(head) {\
+                    (head)->tqh_first = NULL;\
+                    (head)->tqh_last = NULL;\
+                    }
+
+#define	ARRAYQ_FIRST(head)	((head)->tqh_first)
+#define	ARRAYQ_LAST(head, headname)    ((head)->tqh_last)
+
+
+#define ARRAYQ_INSERT_HEAD(head, elm, field) {\
+                    if ( (head)->tqh_first != NULL){\
+                    (elm)->field.tqe_next = (short)((head)->tqh_first - (elm));\
+                    (head)->tqh_first->field.tqe_prev = (short)((elm) - (head)->tqh_first); \
+                    } \
+                    else {\
+                    (head)->tqh_last = (elm);\
+                    (elm)->field.tqe_next = _NULL_DELTA; \
+                    } \
+                    (head)->tqh_first = (elm);\
+                    (elm)->field.tqe_prev = _NULL_DELTA;\
+}
+
+#define ARRAYQ_INSERT_TAIL(head, elm, field) {\
+    (elm)->field.tqe_next = _NULL_DELTA;\
+    if ( (head)->tqh_last != NULL ) {\
+        (elm)->field.tqe_prev = (short)((head)->tqh_last - (elm));  \
+        (head)->tqh_last->field.tqe_next = short((elm) - (head)->tqh_last); \
+    } \
+    else {\
+        (elm)->field.tqe_prev = _NULL_DELTA; \
+        (head)->tqh_first = (elm);\
+    }\
+    (head)->tqh_last = (elm);\
+}
+
+#define ARRAYQ_REMOVE(head, elm, field) {\
+    if (((elm)->field.tqe_next) != _NULL_DELTA) {\
+    if (((elm)->field.tqe_prev) == _NULL_DELTA ) {\
+        ((elm) + (elm)->field.tqe_next)->field.tqe_prev = _NULL_DELTA; \
+        (head)->tqh_first = (elm) + (elm)->field.tqe_next; \
+    } \
+    else {\
+        ((elm) + (elm)->field.tqe_next)->field.tqe_prev += \
+        (elm)->field.tqe_prev; \
+        ((elm) + (elm)->field.tqe_prev)->field.tqe_next += \
+        ((elm)->field.tqe_next); \
+    } } \
+    else {\
+    if (((elm)->field.tqe_prev) == _NULL_DELTA ) \
+    { \
+        (head)->tqh_last = NULL;\
+        (head)->tqh_first = NULL;  \
+    } \
+    else \
+    { \
+        (head)->tqh_last = (elm + (elm)->field.tqe_prev); \
+        (head)->tqh_last->field.tqe_next = _NULL_DELTA; \
+    } } \
+}
 
 #define CAS(a_ptr, a_oldVal, a_newVal) __sync_bool_compare_and_swap(a_ptr, a_oldVal, a_newVal)
 #define ATOMIC_ADD(a_ptr,value) __sync_fetch_and_add(a_ptr,value)
@@ -112,23 +187,23 @@ class Memory {
 
 class TTASLock {
 public:
-    pthread_spinlock_t _lock;
+    pthread_mutex_t _lock;
 
-	TTASLock() : _lock(0) {}
-	~TTASLock() {pthread_spin_destroy(&_lock);}
+	TTASLock() {}
+	~TTASLock() {pthread_mutex_destroy(&_lock);}
 
-	inline void init() {pthread_spin_init(&_lock,0);}
+	inline void init() {pthread_mutex_init(&_lock,NULL);}
 
 	inline void lock() {
-	  pthread_spin_lock(&_lock); 
+	  pthread_mutex_lock(&_lock); 
 	}
 
 	inline bool tryLock() {
-	   return ( 0 == pthread_spin_trylock(&_lock));
+	   return ( 0 == pthread_mutex_trylock(&_lock));
 	}
 
 	inline void unlock() {
-		pthread_spin_unlock(&_lock);
+		pthread_mutex_unlock(&_lock);
 	}
 };
 
@@ -186,7 +261,7 @@ private:
 template < uint32_t MAX_RETIRENUM>
 void hp_record<MAX_RETIRENUM>::hpr_init(void **_g_hps,size_t _size,int _threshold)
 {
-  int i;
+  unsigned int i;
   rcount = 0;
   list = NULL;
   g_hps = _g_hps;
@@ -228,7 +303,6 @@ hp_backoff_gb(volatile unsigned int *c)
 template < uint32_t MAX_RETIRENUM>
 void hp_record<MAX_RETIRENUM>::hpr_destroy()
 {
-   rnode *cur;
    hp_backoff_t backoff = HP_BACKOFF_INITIALIZER;
 
    threshold = 0; 
@@ -525,7 +599,7 @@ public:
 	
 	inline static void dump_key(int key,char *title,char *title2)
 	{		
-		printf("%s %s %d\n",title,title2,key);
+		Debug ("ssl_cache", "%s %s %d\n",title,title2,key);
 	}
 };
 
@@ -703,11 +777,8 @@ private:
 
     /// @brief where the next element where be extracted from
     volatile uint32_t m_readIndex;
-    
-    struct _lru {
-      ELEM *tqh_first;
-      ELEM **tqh_last;
-    }lru_head;
+
+    ARRAYQ_HEAD(_lru, ELEM) lru_head;
 public:
     volatile int32_t lru_nodenum;
     /// @brief constructor of the class
@@ -738,7 +809,7 @@ NBLRUQueue<ELEM, BUFF_SIZE>::NBLRUQueue() :
   for(i=0;i<BUFF_SIZE;i++)
     m_theQueue[i] = NULL0;
   m_theQueue[0] = NULL1;
-  TAILQ_INIT(&lru_head);
+  ARRAYQ_INIT(&lru_head);
 }
 
 template <typename ELEM, uint32_t BUFF_SIZE>
@@ -752,7 +823,7 @@ void NBLRUQueue<ELEM, BUFF_SIZE>::init()
   for(i=0;i<BUFF_SIZE;i++)
     m_theQueue[i] = NULL0;
   m_theQueue[0] = NULL1;
-  TAILQ_INIT(&lru_head);
+  ARRAYQ_INIT(&lru_head);
 }
 
 template <typename ELEM, uint32_t BUFF_SIZE>
@@ -796,8 +867,10 @@ bool NBLRUQueue<ELEM, BUFF_SIZE>::lru_enqueue(const ELEM *a_data)
     uint32_t te,ate,temp;
     ELEM *tt;
     const ELEM *tnew;    
-
+    int i=0;
+    
     do {
+      i++;
       te = m_writeIndex;
       ate = te;    
       tt = m_theQueue[ate];
@@ -827,6 +900,7 @@ bool NBLRUQueue<ELEM, BUFF_SIZE>::lru_enqueue(const ELEM *a_data)
         tt = m_theQueue[ate];
         //the cell after head is occupied
         if(tt != NULL0 && tt != NULL1) {
+          
           return false; //queue full
         }
         //help the dequeue to update head
@@ -860,7 +934,9 @@ int NBLRUQueue<ELEM, BUFF_SIZE>::lru_dequeue(ELEM **a_data_p)
     uint32_t th,temp;
     ELEM *tt;
     ELEM *tnull;
+    int i=0;
     do {
+       i++;
       th = m_readIndex; //read the head
       //here is the one we want to dequeue
       temp = (th + 1)%BUFF_SIZE;
@@ -965,8 +1041,8 @@ void NBLRUQueue<ELEM, BUFF_SIZE>::lru_update_lock()
     //empty key,ignore,the bucket has been deleted
     if(tt->_key != 0)
     {
-      TAILQ_REMOVE((&lru_head), tt, lru_link);
-      TAILQ_INSERT_HEAD((&lru_head), tt, lru_link);
+      ARRAYQ_REMOVE((&lru_head), tt, lru_link);
+      ARRAYQ_INSERT_HEAD((&lru_head), tt, lru_link);
     }
     m_readIndex = temp;
   }
@@ -978,8 +1054,8 @@ void NBLRUQueue<ELEM, BUFF_SIZE>::lru_refresh_lock(ELEM *a_data)
     //empty key,ignore,the bucket has been deleted
     if(a_data->_key != 0)
     {
-      TAILQ_REMOVE((&lru_head), a_data, lru_link);
-      TAILQ_INSERT_HEAD((&lru_head), a_data, lru_link);
+      ARRAYQ_REMOVE((&lru_head), a_data, lru_link);
+      ARRAYQ_INSERT_HEAD((&lru_head), a_data, lru_link);
     }
 }
 
@@ -1017,9 +1093,9 @@ void NBLRUQueue<ELEM, BUFF_SIZE>::lru_remove_lock( ELEM *a_data,volatile int * g
       m_theQueue[temp] = tnull;
     }
   }
-  TAILQ_REMOVE(&lru_head, a_data, lru_link);
-  a_data->lru_link.tqe_next = 0;
-  a_data->lru_link.tqe_prev = 0;
+  ARRAYQ_REMOVE(&lru_head, a_data, lru_link);
+  a_data->lru_link.tqe_next = _NULL_DELTA;
+  a_data->lru_link.tqe_prev = _NULL_DELTA;
       
   lru_nodenum--;
   //assert(lru_nodenum >= 0);
@@ -1030,17 +1106,15 @@ void NBLRUQueue<ELEM, BUFF_SIZE>::lru_remove_lock( ELEM *a_data,volatile int * g
 template <typename ELEM, uint32_t BUFF_SIZE>
 ELEM *NBLRUQueue<ELEM, BUFF_SIZE>::lru_new_lock(ELEM* const a_data,volatile int * g_limit)
 {
-#define	TAILQ_LAST(head, headname)	(*(((struct headname *)((head)->tqh_last))->tqh_last))
-
   ELEM *t = NULL;
 
   //if no quota,free a node
   if(*g_limit <= 0)
   {    
-    t = TAILQ_LAST(&lru_head, _lru);
+    t = ARRAYQ_LAST(&lru_head, _lru);
   }
 
-  TAILQ_INSERT_HEAD(&lru_head, a_data, lru_link);
+  ARRAYQ_INSERT_HEAD(&lru_head, a_data, lru_link);
   lru_nodenum++;
   ATOMIC_ADD(g_limit, -1);
   return t;
@@ -1050,10 +1124,9 @@ ELEM *NBLRUQueue<ELEM, BUFF_SIZE>::lru_new_lock(ELEM* const a_data,volatile int 
 template <typename ELEM, uint32_t BUFF_SIZE>
 ELEM *NBLRUQueue<ELEM, BUFF_SIZE>::lru_getoldest_lock()
 {
-#define	TAILQ_LAST(head, headname)	(*(((struct headname *)((head)->tqh_last))->tqh_last))
   ELEM *t = NULL;
 
-  t = TAILQ_LAST(&lru_head, _lru);
+  t = ARRAYQ_LAST(&lru_head, _lru);
 
   return t;
 }
@@ -1061,6 +1134,7 @@ ELEM *NBLRUQueue<ELEM, BUFF_SIZE>::lru_getoldest_lock()
 ////////////////////////////////////////////////////////////////////////////////
 // CLASS: ConcurrentHopscotchHashMap
 ////////////////////////////////////////////////////////////////////////////////
+typedef void *(*timercb)(unsigned int);
 
 template <typename	_tKey, 
           typename	_tData,
@@ -1079,7 +1153,8 @@ private:
 		_tKey				volatile _key;
 		_tData			volatile _data;
 
-   	    TAILQ_ENTRY(Bucket) lru_link;
+   	    ARRAYQ_ENTRY(Bucket) lru_link;
+        ARRAYQ_ENTRY(Bucket) age_link;//static age link,used for forced timeout
 		ink_hrtime _access_time;
 
 		void init() {
@@ -1094,13 +1169,18 @@ private:
 
 	struct Segment {
 		unsigned int volatile	_timestamp;
+        void     *evict_timer;
 		_tLock	      _lock;
+        ink_hrtime    _age_time; //oldest node's access time
         NBLRUQueue<Bucket,BUFFER_SIZE>  _lru;
+        ARRAYQ_HEAD(_age, Bucket) _age_head;
     
 		void init() {
 		_timestamp = 0;
     	_lock.init();
 		_lru.init();
+        ARRAYQ_INIT(&_age_head);
+        _age_time = HRTIME_FOREVER;
 		}
 	};
 
@@ -1111,14 +1191,14 @@ private:
 	unsigned int volatile		_bucketMask;
 	unsigned int volatile       _segfreeMask;//free bucket border for each segment
 	Segment*	volatile	_segments;
-	Bucket* volatile	_table;
+    Bucket* volatile	_table;
 
 	freecb data_cb;
 	freecb key_cb;
 	int _maxNodeNum;
 	int volatile _curNodeNum;
 	int volatile _timeout;
-	bool volatile _forceTimeout;
+	bool volatile _forceTimeout;//if true,regardless of node activity
 	char * const _name;
 	
 
@@ -1223,6 +1303,7 @@ private:
 			            volatile int temp=1;
 			            //add this node to lru list
 			            segment._lru.lru_new_lock(free_bucket,&temp);
+                        ARRAYQ_INSERT_TAIL(&segment._age_head, free_bucket, age_link);
                          
 						_tHash::relocate_data_reference(free_bucket->_data, relocate_key->_data);
 						_tHash::relocate_key_reference(free_bucket->_key, relocate_key->_key);
@@ -1245,8 +1326,19 @@ private:
 						_tHash::relocate_data_reference(relocate_key->_data, _tHash::_EMPTY_DATA);
 			            //remove it from lru list after it's invisible from hash
 			            //after new_lock and remove_lock,the node number should keep unchanged
-			            segment._lru.lru_remove_lock(relocate_key,&temp);
+                        ARRAYQ_REMOVE(&segment._age_head, relocate_key, age_link);
+                        segment._lru.lru_remove_lock(relocate_key,&temp);
 						relocate_key->_next_delta	= _NULL_DELTA;
+                        if(_forceTimeout)
+                        {
+                           opt_bucket = ARRAYQ_FIRST(&segment._age_head);
+                           segment._age_time = opt_bucket?opt_bucket->_access_time:HRTIME_FOREVER;
+                        }
+                        else
+                        {
+                           opt_bucket = segment._lru.lru_getoldest_lock();
+                           segment._age_time =  opt_bucket?opt_bucket->_access_time:HRTIME_FOREVER;
+                        }
 						return;
 					}
 
@@ -1331,9 +1423,14 @@ public:// Ctors ................................................................
   	_timeout = timeout;
 	_forceTimeout = force;
   }
+
+  int getTimeOut()
+  {
+    return _timeout;
+  }
 	
   // get data Operations .........................................................
-  _tData get( const _tKey& key , int hzd_id=-1) {
+  _tData get( const _tKey& key , int hzd_id=-1, ink_hrtime _timecmp=0) {
 
 		//CALCULATE HASH ..........................
 		const unsigned int hash( _tHash::Calc(key) );
@@ -1344,6 +1441,7 @@ public:// Ctors ................................................................
         //go over the list and look for key
 		unsigned int start_timestamp;
 		bool retry;
+		bool validate = true;
         do {
 			retry = false;
 			start_timestamp = segment._timestamp;
@@ -1375,8 +1473,11 @@ public:// Ctors ................................................................
 		            _hazardPointer->hp_set(hzd_id, (void *)rc);
 					
 		          }
-				  
-				  if(!_forceTimeout)
+
+				  //this bucket is expired compared to _timecmp
+				  if(curr_bucket->_access_time < _timecmp)
+				  	validate = false;
+				  if(!_forceTimeout && validate)
 				    curr_bucket->_access_time = ink_get_hrtime();
 		          
 		          if(curr_bucket->_data != rc)
@@ -1392,7 +1493,7 @@ public:// Ctors ................................................................
 				  }
 		          //enqueue access to lru buffer
 		          //here curr_bucket may be deleted  
-		          if(curr_bucket->_key != _tHash::_EMPTY_KEY && segment._lru.lru_access(curr_bucket) )
+		          if(curr_bucket->_key != _tHash::_EMPTY_KEY && !segment._lru.lru_access(curr_bucket) )
 		          {
 		            //queue is full,try lock
 		            if(segment._lock.tryLock())
@@ -1403,7 +1504,7 @@ public:// Ctors ................................................................
 		            }
 		          }
 				  ink_hrtime c = ink_get_hrtime();		   
-			 	  if(_timeout && c - curr_bucket->_access_time >= ink_hrtime_from_sec(_timeout))
+			 	  if(!validate || (_timeout && c - curr_bucket->_access_time >= ink_hrtime_from_sec(_timeout)))
 			 	  {
 				  	 //if this item is expired,don't continue to use it,this itme will 
 				  	 //be retired in evict timer
@@ -1422,7 +1523,7 @@ public:// Ctors ................................................................
 
 	//modification Operations ...................................................
     //don't try to use the returned data,it is just to indicate key existance
-	_tData putIfAbsent(const _tKey& key, const _tData& data,int hzd_id=-1) {
+	_tData putIfAbsent(const _tKey& key, const _tData& data,int hzd_id=-1, bool force=false) {
 		const unsigned int hash( _tHash::Calc(key) );
         _tData retired = _tHash::_EMPTY_DATA;
 		const unsigned int segnum((hash >> _segmentShift) & _segmentMask);
@@ -1430,7 +1531,14 @@ public:// Ctors ................................................................
 		Segment&	segment(_segments[segnum]);
 
 		//go over the list and look for key
-		segment._lock.lock();
+		if(force)
+		    segment._lock.lock();
+        else if(!segment._lock.tryLock())
+        {
+            //try lock failed,won't do that
+            return data;
+        }
+            
 		Bucket* const start_bucket( &(_table[hash & _bucketMask]) );
 
 		Bucket* last_bucket( NULL );
@@ -1462,7 +1570,10 @@ public:// Ctors ................................................................
 		            retired = remove_direct_lock(rc, segment,hzd_id);
 		            assert(retired != _tHash::_EMPTY_DATA);
 		          }
-				  add_key_to_begining_of_list(start_bucket, free_bucket, hash, key, data);    
+                  ARRAYQ_INSERT_TAIL(&segment._age_head, free_bucket, age_link);
+				  add_key_to_begining_of_list(start_bucket, free_bucket, hash, key, data);  
+                  if(free_bucket->_access_time < segment._age_time)
+                     segment._age_time = free_bucket->_access_time;
 				  segment._lock.unlock();
 		          if(retired != _tHash::_EMPTY_DATA)
 		          {
@@ -1495,6 +1606,7 @@ public:// Ctors ................................................................
           retired = remove_direct_lock(rc, segment,hzd_id);	
           assert(retired != _tHash::_EMPTY_DATA);
         }
+        ARRAYQ_INSERT_TAIL(&segment._age_head, free_max_bucket, age_link);
 		//update last_bucket,because we may have just removed the last bucket
 		last_bucket = NULL;
         compare_bucket = start_bucket;
@@ -1506,7 +1618,9 @@ public:// Ctors ................................................................
 		}
 		
         add_key_to_end_of_list(start_bucket, free_max_bucket, hash, key, data, last_bucket);
-				segment._lock.unlock();
+        if(free_max_bucket->_access_time < segment._age_time)
+           segment._age_time = free_max_bucket->_access_time;
+	    segment._lock.unlock();
         if(retired != _tHash::_EMPTY_DATA)
         {
           if(data_cb)
@@ -1534,6 +1648,7 @@ public:// Ctors ................................................................
 		          retired = remove_direct_lock(rc, segment,hzd_id);
 		          assert(retired != _tHash::_EMPTY_DATA);
 		        }
+                ARRAYQ_INSERT_TAIL(&segment._age_head, free_min_bucket, age_link);
 				//update last_bucket,because we may have just removed the last bucket
 				last_bucket = NULL;
 		        compare_bucket = start_bucket;
@@ -1544,6 +1659,8 @@ public:// Ctors ................................................................
 					    next_delta = compare_bucket->_next_delta;
 				}
 				add_key_to_end_of_list(start_bucket, free_min_bucket, hash, key, data, last_bucket);
+                if(free_min_bucket->_access_time < segment._age_time)
+                   segment._age_time = free_min_bucket->_access_time;
 		        segment._lock.unlock();
 		        if(retired != _tHash::_EMPTY_DATA)
 		        {
@@ -1569,14 +1686,22 @@ public:// Ctors ................................................................
 
     //put if absent,update if existed
     //don't try to use the returned data,it is just to indicate key existance
-	_tData putUpdate(const _tKey& key, const _tData& data,int hzd_id=-1) {
+	_tData putUpdate(const _tKey& key, const _tData& data,int hzd_id=-1, bool force=false) {
 		const unsigned int hash( _tHash::Calc(key) );
         _tData retired = _tHash::_EMPTY_DATA;
 	    const unsigned int segnum((hash >> _segmentShift) & _segmentMask);
 		Segment&	segment(_segments[segnum]);
 
 		//go over the list and look for key
-		segment._lock.lock();
+		if(force)
+		    segment._lock.lock();
+        else if(!segment._lock.tryLock())
+        {
+            //try lock failed
+            if(data_cb) data_cb((void *)data);
+		    if(key_cb) key_cb((void *)key);
+            return _tHash::_EMPTY_DATA;
+        }
 		Bucket* const start_bucket( &(_table[hash & _bucketMask]) );
 
 		Bucket* last_bucket( NULL );
@@ -1587,7 +1712,7 @@ public:// Ctors ................................................................
 			if( hash == compare_bucket->_hash && _tHash::IsEqual(key, compare_bucket->_key) ) {
 				const _tData rc((_tData&)(compare_bucket->_data));
 				const _tKey k((_tKey&)(compare_bucket->_key));
-				assert(compare_bucket->_data != data);
+				//assert(compare_bucket->_data != data);
 				compare_bucket->_key = key;
 				compare_bucket->_data = data;
 				
@@ -1619,8 +1744,11 @@ public:// Ctors ................................................................
 		            retired = remove_direct_lock(rc, segment,hzd_id);
 		            assert(retired != _tHash::_EMPTY_DATA);
 		          }
+                  ARRAYQ_INSERT_TAIL(&segment._age_head, free_bucket, age_link);
 			      add_key_to_begining_of_list(start_bucket, free_bucket, hash, key, data);    
-				  segment._lock.unlock();
+                  if(free_bucket->_access_time < segment._age_time)
+                     segment._age_time = free_bucket->_access_time;
+                  segment._lock.unlock();
 		          if(retired != _tHash::_EMPTY_DATA)
 		          {
 		            if(data_cb)
@@ -1652,6 +1780,7 @@ public:// Ctors ................................................................
           retired = remove_direct_lock(rc, segment,hzd_id);	
           assert(retired != _tHash::_EMPTY_DATA);
         }
+        ARRAYQ_INSERT_TAIL(&segment._age_head, free_max_bucket, age_link);
 		//update last_bucket,because we may have just removed the last bucket
 		last_bucket = NULL;
         compare_bucket = start_bucket;
@@ -1662,7 +1791,9 @@ public:// Ctors ................................................................
 			    next_delta = compare_bucket->_next_delta;
 		}
         add_key_to_end_of_list(start_bucket, free_max_bucket, hash, key, data, last_bucket);
-				segment._lock.unlock();
+        if(free_max_bucket->_access_time < segment._age_time)
+          segment._age_time = free_max_bucket->_access_time;
+        segment._lock.unlock();
         if(retired != _tHash::_EMPTY_DATA)
         {
           if(data_cb)
@@ -1690,6 +1821,7 @@ public:// Ctors ................................................................
           retired = remove_direct_lock(rc, segment,hzd_id);
           assert(retired != _tHash::_EMPTY_DATA);
         }
+        ARRAYQ_INSERT_TAIL(&segment._age_head, free_min_bucket, age_link);
 		//update last_bucket,because we may have just removed the last bucket
 		last_bucket = NULL;
         compare_bucket = start_bucket;
@@ -1700,6 +1832,8 @@ public:// Ctors ................................................................
 			    next_delta = compare_bucket->_next_delta;
 		}
 		add_key_to_end_of_list(start_bucket, free_min_bucket, hash, key, data, last_bucket);
+        if(free_min_bucket->_access_time < segment._age_time)
+          segment._age_time = free_min_bucket->_access_time;
         segment._lock.unlock();
         if(retired != _tHash::_EMPTY_DATA)
         {
@@ -1746,11 +1880,22 @@ public:// Ctors ................................................................
 				_tData const rc((_tData&)(curr_bucket->_data));
                 _tKey const k((_tKey&)(curr_bucket->_key));
 				remove_key(segment, start_bucket, curr_bucket, last_bucket, hash);
+                ARRAYQ_REMOVE(&segment._age_head, curr_bucket, age_link);
 		        //if(key_cb) key_cb((void *)k);
 		        segment._lru.lru_remove_lock(curr_bucket,&_curNodeNum);
 		        segment._lru.lru_update_lock();
 				if( _is_cacheline_alignment )
 					optimize_cacheline_use(segment, curr_bucket, hzd_id);
+                if(_forceTimeout)
+                {
+                   last_bucket = ARRAYQ_FIRST(&segment._age_head);
+                   segment._age_time = last_bucket?last_bucket->_access_time:HRTIME_FOREVER;
+                }
+                else
+                {
+                   last_bucket = segment._lru.lru_getoldest_lock();
+                   segment._age_time =  last_bucket?last_bucket->_access_time:HRTIME_FOREVER;
+                }
 				segment._lock.unlock();
 		        //retire node
 		        if(data_cb)       
@@ -1788,7 +1933,19 @@ public:// Ctors ................................................................
         assert(_tHash::IsEqual(bucket->_key, curr_bucket->_key));
         remove_key(segment, start_bucket, bucket, last_bucket, hash);
         //if(key_cb) key_cb((void *)k);
+        ARRAYQ_REMOVE(&segment._age_head, curr_bucket, age_link);
         segment._lru.lru_remove_lock(curr_bucket,&_curNodeNum);
+        
+        if(_forceTimeout)
+        {
+           last_bucket = ARRAYQ_FIRST(&segment._age_head);
+           segment._age_time = last_bucket?last_bucket->_access_time:HRTIME_FOREVER;
+        }
+        else
+        {
+           last_bucket = segment._lru.lru_getoldest_lock();
+           segment._age_time =  last_bucket?last_bucket->_access_time:HRTIME_FOREVER;
+        }
         if( _is_cacheline_alignment )
 		  optimize_cacheline_use(segment, curr_bucket, hzd_id);
 		if(key_cb) 
@@ -1802,29 +1959,41 @@ public:// Ctors ................................................................
     return _tHash::_EMPTY_DATA;
   }
 
-#define DEBUG_EVICT    1
+//#define DEBUG_EVICT    1
   //call this in your timer
-  inline void evict_item(int timeout,int hzd_id) {
+  inline void evict_item(int timeout,unsigned int arg, int hzd_id) {
   #define MAX_EVICT 16
-     static int volatile  cur_seg;
-
+ 
      _tData e_data[MAX_EVICT];
 	 int idx=0;
 	 ink_hrtime c;
 	 Bucket *bucket;
-	 int seg = cur_seg;	 	 
-	 Segment& segment(_segments[seg]);
+
+     if(arg > _segmentMask)
+        return;
+	
+     c = ink_get_hrtime();
+
+     if(c < _segments[arg]._age_time + ink_hrtime_from_sec(timeout))
+     {  
+       return;
+     }
+     
+     Segment& segment(_segments[arg]);
 
 	 //try lock failed,this segment have to wait for a whole round complete 	 
 	 segment._lock.lock();
-	
-	 c = ink_get_hrtime();
-	 while((bucket=segment._lru.lru_getoldest_lock()) != NULL)
+     bool t = _forceTimeout;
+
+	 while((bucket=(t?ARRAYQ_FIRST(&segment._age_head):segment._lru.lru_getoldest_lock())) != NULL)
 	 {
+        printf("%lld %lld %lld\n",c,bucket->_access_time,ink_hrtime_from_sec(timeout));
 	 	if(c - bucket->_access_time < ink_hrtime_from_sec(timeout))
 	      break;
- #ifdef DEBUG_EVICT       
-        _tHash::dump_key(bucket->_key, _name, "Evict item");
+ #ifdef DEBUG_EVICT      
+        char title[64];
+        sprintf(title,"Evict seg %d item:",arg);
+        _tHash::dump_key(bucket->_key, _name, title);
  #endif
 	    _tData rc =  remove_direct_lock(bucket, segment, hzd_id);
 
@@ -1835,7 +2004,7 @@ public:// Ctors ................................................................
 		  if(idx >= MAX_EVICT)
 		  	break;
         }
-	 }	 
+	 }
      segment._lock.unlock();
      
      if(data_cb)
@@ -1846,9 +2015,14 @@ public:// Ctors ................................................................
          _hazardPointer->hp_free(hzd_id, (void *)e_data[i], data_cb);
 	   }
      }
-	 
-	 seg = (seg+1) & _segmentMask;
-	 cur_seg = seg;
+  }
+
+  void setTimer(timercb fp)
+  {
+    for(unsigned int i=0; i<=_segmentMask; i++)
+    {
+      _segments[i].evict_timer = fp(i);
+    }    
   }
 
 	//status Operations .........................................................
@@ -2090,8 +2264,6 @@ void *thr_fn(void *arg)
 //then retire all nodes
 int main()
 {
-#define	TAILQ_LAST(head, headname)	(*(((struct headname *)((head)->tqh_last))->tqh_last))
-
     int type = 1;
     time_t t;
     srand((unsigned)time(&t));

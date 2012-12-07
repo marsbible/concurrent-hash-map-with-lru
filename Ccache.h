@@ -54,6 +54,7 @@
 
 #ifdef CCACHE_TEST
 #include <time.h>
+#define HRTIME_FOREVER  (0x7FFFFFFF)
 typedef time_t ink_hrtime;
 
 ink_hrtime ccache_time()
@@ -391,7 +392,7 @@ void hp_record<MAX_RETIRENUM>::hpr_free(void *data,freecb _cb)
       else
         mhps[eidx--] = g_hps[i];
 
-      if(sidx == eidx)
+      if(sidx >= eidx)
         break;        
     }
   }
@@ -448,7 +449,11 @@ void hp_record<MAX_RETIRENUM>::hpr_free(void *data,freecb _cb)
       mhps[eidx] = mhps[sidx];      
     }
     mhps[sidx] = t;
-    if(mhps[sidx] <= cur->data) sidx++;
+    if(mhps[sidx] <= cur->data) 
+    {
+        if(mhps[sidx] == cur->data) find=true; 
+        sidx++;
+    }
     eidx = MAX_HPNUM-1;
     
     if(!find)
@@ -599,7 +604,7 @@ public:
 	
 	inline static void dump_key(int key,char *title,char *title2)
 	{		
-		Debug ("ssl_cache", "%s %s %d\n",title,title2,key);
+		printf("ssl_cache %s %s %d\n",title,title2,key);
 	}
 };
 
@@ -1987,7 +1992,7 @@ public:// Ctors ................................................................
 
 	 while((bucket=(t?ARRAYQ_FIRST(&segment._age_head):segment._lru.lru_getoldest_lock())) != NULL)
 	 {
-            if(c - bucket->_access_time < ink_hrtime_from_sec(timeout))
+     	if(c - bucket->_access_time < ink_hrtime_from_sec(timeout))
 	      break;
  #ifdef DEBUG_EVICT      
         char title[64];
@@ -2147,7 +2152,7 @@ void myfree(void *xx)
   free(xx); 
 }
 
-typedef HAZARD_POINTER<16,1,10> LOCAL_HP;
+typedef HAZARD_POINTER<32,2,8> LOCAL_HP;
 LOCAL_HP hzp;
 
 HopscotchHashMap<int,char *,HASH_INT<char *>, TTASLock, Memory, LOCAL_HP, 3> hhm("",&hzp,NULL,myfree,32,256);
@@ -2168,7 +2173,7 @@ pthread_key_t my_key;
 void *thr_fn(void *arg)
 {
   thread_struct* p = NULL;
-  int loop = 500;
+  int loop = 1000;
   int type = *((int *)arg);
 
   p = (thread_struct *)pthread_getspecific(my_key);
@@ -2225,11 +2230,13 @@ void *thr_fn(void *arg)
          data = hhm.get(i,p->hp_id);
       if(data != 0)
       {
+        usleep(3);  
         printf("%d get %s %s ok.\n",p->hp_id,url_key[i],data); 
         break;
       }  
     }
 
+#if 0
     key = rand()%100 + 1;
 
     if(type)
@@ -2242,11 +2249,11 @@ void *thr_fn(void *arg)
       if(hhm.remove(key, p->hp_id))
         printf("%d remove %d ok.\n",p->hp_id,key);
     }
+#endif    
    
-    sleep(1);
+    usleep(120);
   }while(loop--);
 
-  hzp.hp_set(p->hp_id, NULL);
 
   for(int i=1;i<=100;i++)
   {
@@ -2255,6 +2262,8 @@ void *thr_fn(void *arg)
      else
        hhm.remove(i, p->hp_id);
   }
+  hzp.hp_set(p->hp_id, NULL);
+  hzp.hp_set(p->hp_id, NULL, 1);
   
   hzp.hp_unregister(p->hp_id);
 }

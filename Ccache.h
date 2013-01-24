@@ -210,6 +210,10 @@ public:
 
 //HAZARD POINTER
 typedef void (*freecb)(void *data);
+typedef void (*errorcb)(void *data, int errcode);
+#define CCACHE_ERR_SAME_DATA 1
+#define CCACHE_ERR_SAME_KEY 2
+
 
 template <uint32_t MAX_RETIRENUM>
 struct hp_record {
@@ -1200,6 +1204,8 @@ private:
 
 	freecb data_cb;
 	freecb key_cb;
+    errorcb data_errcb; //error handling cb for data
+	errorcb key_errcb; //error handling cb for error
 	int _maxNodeNum;
 	int volatile _curNodeNum;
 	int volatile _timeout;
@@ -1363,6 +1369,8 @@ public:// Ctors ................................................................
 		_tHazardPointer *hzp = NULL,
         freecb _kcb = NULL,
         freecb _dcb = NULL,
+        errorcb _kecb = NULL,
+        errorcb _decb = NULL,
         int maxNodeNum = 32*1024,
 				unsigned int inCapacity				= 32*1024,	//init capacity
 				unsigned int concurrencyLevel	   = 16,			//num of updating threads
@@ -1388,6 +1396,8 @@ public:// Ctors ................................................................
 		_hazardPointer = hzp;
         data_cb = _dcb;
         key_cb = _kcb;
+        data_errcb = _decb;
+        key_errcb = _kecb;
 
 		//ALLOCATE THE SEGMENTS ...................
 		_segments = (Segment*) _tMemory::byte_aligned_malloc( (_segmentMask + 1) * sizeof(Segment) );
@@ -1715,19 +1725,31 @@ public:// Ctors ................................................................
 		while (_NULL_DELTA != next_delta) {
 			compare_bucket += next_delta;
 			if( hash == compare_bucket->_hash && _tHash::IsEqual(key, compare_bucket->_key) ) {
-				const _tData rc((_tData&)(compare_bucket->_data));
-				const _tKey k((_tKey&)(compare_bucket->_key));
-				//assert(compare_bucket->_data != data);
+				_tData rc((_tData&)(compare_bucket->_data));
+				_tKey k((_tKey&)(compare_bucket->_key));
+				if(compare_bucket->_data == data)
+				{
+                   if(data_errcb)
+                     data_errcb(data, CCACHE_ERR_SAME_DATA);
+                   rc = _tHash::_EMPTY_DATA;
+				}
+                if(compare_bucket->_key == key)
+                {
+                   if(key_errcb)
+                     key_errcb(key, CCACHE_ERR_SAME_KEY);
+                   k = _tHash::_EMPTY_KEY;
+                }                
 				compare_bucket->_key = key;
 				compare_bucket->_data = data;
-				
+				compare_bucket->_access_time = ink_get_hrtime();				
+
 				//if(key_cb) key_cb(k);
 			    segment._lru.lru_update_lock();
                 segment._lru.lru_refresh_lock((Bucket*)compare_bucket);
 				segment._lock.unlock();
-                if(data_cb)
+                if(data_cb && rc != _tHash::_EMPTY_DATA)
 		          _hazardPointer->hp_free(hzd_id, (void *)rc, data_cb);		        
-				if(key_cb)					
+				if(key_cb && k != _tHash::_EMPTY_KEY)					
 				  _hazardPointer->hp_free(hzd_id, (void *)k, key_cb);
 				return data;
 			}
@@ -1966,22 +1988,22 @@ public:// Ctors ................................................................
 
 //#define DEBUG_EVICT    1
   //call this in your timer
-  inline void evict_item(int timeout,unsigned int arg, int hzd_id) {
+  inline u_int32_t evict_item(int timeout,unsigned int arg, int hzd_id) {
   #define MAX_EVICT 16
  
      _tData e_data[MAX_EVICT];
 	 int idx=0;
 	 ink_hrtime c;
 	 Bucket *bucket;
-
+     u_int32_t timeout_num = 0;
      if(arg > _segmentMask)
-        return;
+        return timeout_num;
 	
      c = ink_get_hrtime();
 
      if(c < _segments[arg]._age_time + ink_hrtime_from_sec(timeout))
      {  
-       return;
+       return timeout_num;
      }
      
      Segment& segment(_segments[arg]);
@@ -2000,7 +2022,7 @@ public:// Ctors ................................................................
         _tHash::dump_key(bucket->_key, _name, title);
  #endif
 	    _tData rc =  remove_direct_lock(bucket, segment, hzd_id);
-
+        timeout_num++;
         assert(rc != _tHash::_EMPTY_DATA);	   
         if(rc != _tHash::_EMPTY_DATA)
         {
@@ -2019,6 +2041,7 @@ public:// Ctors ................................................................
          _hazardPointer->hp_free(hzd_id, (void *)e_data[i], data_cb);
 	   }
      }
+     return timeout_num;
   }
 
   void setTimer(timercb fp)

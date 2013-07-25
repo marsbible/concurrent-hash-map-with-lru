@@ -396,7 +396,7 @@ void hp_record<MAX_RETIRENUM>::hpr_free(void *data,freecb _cb)
       else
         mhps[eidx--] = g_hps[i];
 
-      if(sidx >= eidx)
+      if(sidx > eidx)
         break;        
     }
   }
@@ -435,31 +435,31 @@ void hp_record<MAX_RETIRENUM>::hpr_free(void *data,freecb _cb)
   {
     find = false;
     
-    if(sidx >= eidx)
-      break;
-    
-    t = mhps[sidx];
-    while(sidx < eidx)
-    {
-      while(sidx < eidx && mhps[eidx] > cur->data)
-        eidx--;
-      mhps[sidx] = mhps[eidx];
-      
-      while(sidx < eidx && mhps[sidx] <= cur->data)
-      {
-        if(mhps[sidx] == cur->data) find = true;
-        sidx++;
-      }  
-      mhps[eidx] = mhps[sidx];      
+    if(sidx <= eidx) {
+
+        t = mhps[sidx];
+        while(sidx < eidx)
+        {
+            while(sidx < eidx && mhps[eidx] > cur->data)
+                eidx--;
+            mhps[sidx] = mhps[eidx];
+
+            while(sidx < eidx && mhps[sidx] <= cur->data)
+            {
+                if(mhps[sidx] == cur->data) find = true;
+                sidx++;
+            }  
+            mhps[eidx] = mhps[sidx];      
+        }
+        mhps[sidx] = t;
+        if(mhps[sidx] <= cur->data) 
+        {
+            if(mhps[sidx] == cur->data) find=true; 
+            sidx++;
+        }
+        eidx = MAX_HPNUM-1;
     }
-    mhps[sidx] = t;
-    if(mhps[sidx] <= cur->data) 
-    {
-        if(mhps[sidx] == cur->data) find=true; 
-        sidx++;
-    }
-    eidx = MAX_HPNUM-1;
-    
+
     if(!find)
     {
       void *data = cur->data;
@@ -493,7 +493,7 @@ void hp_record<MAX_RETIRENUM>::hpr_free(void *data,freecb _cb)
 template <uint32_t MAX_THREADS, uint32_t HP_NUM_PERTHREAD, uint32_t MAX_RETIRENUM>
 class HAZARD_POINTER {
 public:
-  HAZARD_POINTER() {pool_lock.init();}
+  HAZARD_POINTER() {pool_lock.init(); memset(g_hps, 0 , sizeof(g_hps));}
   ~HAZARD_POINTER() {}
   void hp_init();
 
@@ -1730,13 +1730,13 @@ public:// Ctors ................................................................
 				if(compare_bucket->_data == data)
 				{
                    if(data_errcb)
-                     data_errcb(data, CCACHE_ERR_SAME_DATA);
+                     data_errcb((void *)data, CCACHE_ERR_SAME_DATA);
                    rc = _tHash::_EMPTY_DATA;
 				}
                 if(compare_bucket->_key == key)
                 {
                    if(key_errcb)
-                     key_errcb(key, CCACHE_ERR_SAME_KEY);
+                     key_errcb((void *)key, CCACHE_ERR_SAME_KEY);
                    k = _tHash::_EMPTY_KEY;
                 }                
 				compare_bucket->_key = key;
@@ -1751,7 +1751,7 @@ public:// Ctors ................................................................
 		          _hazardPointer->hp_free(hzd_id, (void *)rc, data_cb);		        
 				if(key_cb && k != _tHash::_EMPTY_KEY)					
 				  _hazardPointer->hp_free(hzd_id, (void *)k, key_cb);
-				return data;
+				return rc;
 			}
 			last_bucket = compare_bucket;
 			next_delta = compare_bucket->_next_delta;
